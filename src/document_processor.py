@@ -287,7 +287,13 @@ class DocumentProcessor:
         Returns:
             Dictionary with image data and metadata
         """
+        import io
+
         img = Image.open(image_path)
+
+        # Convert to RGB if necessary (JPEG doesn't support RGBA or P mode)
+        if img.mode in ('RGBA', 'LA', 'P'):
+            img = img.convert('RGB')
 
         # Resize if too large (LLaVA works best with smaller images)
         max_size = 512
@@ -296,8 +302,10 @@ class DocumentProcessor:
             new_size = tuple(int(dim * ratio) for dim in img.size)
             img = img.resize(new_size, Image.Resampling.LANCZOS)
 
-        # Convert to base64
-        image_b64 = self.get_image_base64(image_path)
+        # Convert resized image to base64
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=85)
+        image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
         return {
             'path': str(image_path),
