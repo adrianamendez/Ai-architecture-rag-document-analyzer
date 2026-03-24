@@ -52,6 +52,7 @@ data/eval_dataset/*.json
 # Jupyter Notebooks
 .ipynb_checkpoints/
 *.ipynb
+!rag_demo_notebook.ipynb
 
 # Temporary files
 tmp/
