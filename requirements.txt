@@ -1,0 +1,25 @@
+# Web Framework
+streamlit>=1.28.0
+
+# Vector Database and Embeddings
+chromadb>=0.4.15
+sentence-transformers>=2.2.2
+
+# Visualization
+plotly>=5.17.0
+pandas>=2.1.3
+numpy>=1.24.3
+
+# Image Processing
+Pillow>=10.0.0
+
+# Dimensionality Reduction for Embedding Maps
+umap-learn>=0.5.4
+scikit-learn>=1.3.0
+
+# RAGAS Evaluation Framework
+ragas>=0.1.0
+datasets>=2.14.0
+
+# HTTP Requests (for Ollama API)
+requests>=2.31.0
