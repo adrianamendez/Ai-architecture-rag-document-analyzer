@@ -25,12 +25,15 @@ DOG_BREEDS_CSV = DOCUMENTS_DIR / "dog_breeds.csv"
 
 # Ollama configuration
 OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_CONFIG = {
+    "base_url": OLLAMA_BASE_URL,
+}
 
 # Model configurations for different RAG strategies
 MODELS = {
     "text_only": {
-        "name": "llama3",
-        "description": "Text-only RAG using Llama 3",
+        "name": "llama3.2:latest",
+        "description": "Text-only RAG using Llama 3.2",
         "supports_vision": False,
         "temperature": 0.7,
         "top_p": 0.9,

@@ -20,7 +20,6 @@ from config import (
     CHUNKING_STRATEGIES,
 )
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -373,3 +372,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# Backward-compatible alias used by notebooks/imports created before refactor.
+MultimodalDocumentProcessor = DocumentProcessor

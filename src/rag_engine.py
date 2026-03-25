@@ -22,7 +22,6 @@ from config import (
 )
 from document_processor import Document, DocumentProcessor
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +78,26 @@ class RAGEngine:
             logger.info(f"Loading reranker: {RETRIEVAL_CONFIG['reranker_model']}")
             self.reranker = CrossEncoder(RETRIEVAL_CONFIG['reranker_model'])
 
+    @staticmethod
+    def _sanitize_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Ensure metadata values are compatible with Chroma types.
+        Nested dicts/objects are converted to JSON strings.
+        """
+        sanitized = {}
+        for key, value in metadata.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                sanitized[key] = value
+            elif isinstance(value, list):
+                sanitized[key] = value
+            else:
+                # Convert nested dicts/objects to JSON-safe strings.
+                try:
+                    sanitized[key] = json.dumps(value, ensure_ascii=False)
+                except TypeError:
+                    sanitized[key] = str(value)
+        return sanitized
+
     def ingest_documents(self, force_rebuild: bool = False) -> int:
         """
         Ingest all dog breed documents into vector database.
@@ -115,7 +134,7 @@ class RAGEngine:
         ids = [doc.doc_id for doc in documents]
         embeddings = [doc.embedding.tolist() for doc in documents]
         documents_text = [doc.content for doc in documents]
-        metadatas = [doc.metadata for doc in documents]
+        metadatas = [self._sanitize_metadata(doc.metadata) for doc in documents]
 
         # Add to collection in batches
         batch_size = 100
@@ -290,16 +309,63 @@ class RAGEngine:
         if images_data:
             payload["images"] = [img['base64'] for img in images_data[:2]]  # Max 2 images
 
-        try:
-            response = requests.post(
-                f"{OLLAMA_BASE_URL}/api/generate",
-                json=payload,
-                timeout=60,
-            )
-            response.raise_for_status()
-            result = response.json()
+        # Try Ollama-native route first, then common compatible routes.
+        endpoints = [
+            f"{OLLAMA_BASE_URL}/api/generate",
+            f"{OLLAMA_BASE_URL}/api/chat",
+            f"{OLLAMA_BASE_URL}/v1/chat/completions",
+        ]
 
-            answer = result.get('response', 'No response generated')
+        last_error = None
+        result = None
+        answer = None
+        used_endpoint = None
+
+        for endpoint in endpoints:
+            try:
+                if endpoint.endswith("/api/generate"):
+                    req_payload = payload
+                elif endpoint.endswith("/api/chat"):
+                    req_payload = {
+                        "model": self.model_config["name"],
+                        "messages": [{"role": "user", "content": prompt}],
+                        "stream": False,
+                        "options": payload["options"],
+                    }
+                    if images_data:
+                        req_payload["images"] = [img["base64"] for img in images_data[:2]]
+                else:
+                    req_payload = {
+                        "model": self.model_config["name"],
+                        "messages": [{"role": "user", "content": prompt}],
+                        "stream": False,
+                        "temperature": self.model_config["temperature"],
+                        "top_p": self.model_config["top_p"],
+                    }
+
+                response = requests.post(endpoint, json=req_payload, timeout=60)
+                response.raise_for_status()
+                result = response.json()
+                used_endpoint = endpoint
+
+                if endpoint.endswith("/api/generate"):
+                    answer = result.get("response", "No response generated")
+                elif endpoint.endswith("/api/chat"):
+                    answer = result.get("message", {}).get("content", "No response generated")
+                else:
+                    answer = (
+                        result.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "No response generated")
+                    )
+                break
+            except Exception as e:
+                last_error = e
+                continue
+
+        try:
+            if answer is None:
+                raise RuntimeError(str(last_error) if last_error else "Unknown generation error")
 
             return {
                 'answer': answer,
@@ -307,6 +373,7 @@ class RAGEngine:
                 'model': self.model_config['name'],
                 'images_used': len(images_data),
                 'prompt': prompt,
+                'endpoint_used': used_endpoint,
             }
 
         except Exception as e:

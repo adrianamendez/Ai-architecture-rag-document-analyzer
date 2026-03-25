@@ -22,7 +22,6 @@ from sklearn.manifold import TSNE
 
 from config import VIZ_CONFIG, RAGAS_METRICS
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

@@ -1,5 +1,5 @@
 {
-  "total_breeds": 64,
+  "total_breeds": 65,
   "breeds": [
     {
       "name": "German Shepherd",
@@ -959,6 +959,21 @@
         "Longevity (yrs)": "12-15",
         "Character Traits": "Intelligent, energetic, playful, good-natured",
         "Common Health Problems": "Dental problems, eye issues, skin allergies"
+      }
+    },
+    {
+      "name": "Siberian Husky",
+      "image_folder": "siberian_husky",
+      "images_count": 40,
+      "characteristics": {
+        "Breed": "Siberian Husky",
+        "Country of Origin": "Russia (Siberia)",
+        "Fur Color": "Black, White, Gray, Red, Agouti",
+        "Height (in)": "20-24",
+        "Color of Eyes": "Blue, Brown, or Heterochromia",
+        "Longevity (yrs)": "12-14",
+        "Character Traits": "Outgoing, alert, friendly, intelligent, energetic",
+        "Common Health Problems": "Hip dysplasia, cataracts, progressive retinal atrophy"
       }
     }
   ]

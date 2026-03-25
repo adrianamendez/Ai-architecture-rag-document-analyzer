@@ -15,7 +15,6 @@ from config import (
     EVAL_DATASET_SIZE,
 )
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

@@ -21,7 +21,6 @@ from ragas.metrics import (
 from config import EVAL_DIR, RAGAS_METRICS
 from rag_engine import RAGEngine
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
