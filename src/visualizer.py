@@ -3,7 +3,6 @@ Visualization module for RAG evaluation and embedding analysis.
 Creates RAGAS radar charts and embedding space maps.
 """
 
-import json
 import logging
 from typing import List, Dict, Any, Optional
 import numpy as np

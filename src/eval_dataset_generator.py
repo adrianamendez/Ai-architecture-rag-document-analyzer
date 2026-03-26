@@ -6,7 +6,6 @@ Creates Q&A pairs from dog breed data for RAGAS evaluation.
 import json
 import random
 import logging
-from pathlib import Path
 from typing import List, Dict, Any
 
 from config import (

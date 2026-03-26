@@ -9,22 +9,6 @@ import json
 import pandas as pd
 from pathlib import Path
 import plotly.graph_objects as go
-import base64
-import sys
-import uuid
-import traceback
-
-# Runtime integration with src/ pipeline
-SRC_DIR = Path(__file__).resolve().parent / "src"
-if SRC_DIR.exists() and str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
-BACKEND_IMPORT_ERROR = None
-try:
-    from config import check_ollama_available
-    from rag_engine import RAGEngine
-except Exception as e:
-    BACKEND_IMPORT_ERROR = str(e)
 
 # Page configuration
 st.set_page_config(
@@ -48,18 +32,20 @@ st.info("""
 
 🎥 For full interactive version with Ollama, run locally or see video demo.
 """)
+st.warning("""
+This Streamlit page is intentionally notebook-aligned and uses **hardcoded outputs** from the notebook.
+
+If you want to run a **live** version, users must run local services on their machine:
+- `ollama serve`
+- `ollama pull llama3.2:latest`
+- `ollama pull llava`
+""")
 
 # Sidebar
 with st.sidebar:
     st.header("ℹ️ About This Demo")
-    if BACKEND_IMPORT_ERROR:
-        st.error("Backend import failed")
-        st.caption(BACKEND_IMPORT_ERROR)
-    else:
-        if check_ollama_available():
-            st.success("✓ Ollama detected (http://localhost:11434)")
-        else:
-            st.warning("Ollama not detected. Live demo buttons may fail.")
+    st.info("Notebook-aligned mode: hardcoded responses and metrics are shown.")
+    st.caption("Live inference is not executed in this page.")
 
     st.markdown("""
     **What This Shows:**
@@ -93,236 +79,6 @@ breed_data = load_breed_data()
 if breed_data is None:
     st.error("⚠️ Dataset not found. Please ensure data/breed_mapping.json exists.")
     st.stop()
-
-def _wc(text: str) -> int:
-    return len((text or "").split())
-
-
-def _top_breeds(docs):
-    if not docs:
-        return "N/A"
-    return ", ".join([d.get("metadata", {}).get("breed", "Unknown") for d in docs[:3]])
-
-
-def _norm(value: str) -> str:
-    return (value or "").strip().lower()
-
-
-def _contains_any(text: str, values) -> bool:
-    normalized = _norm(text)
-    return any(_norm(v) in normalized for v in values if _norm(v))
-
-
-def _encode_image_b64(image_path: Path) -> str:
-    with open(image_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
-
-
-@st.cache_resource(show_spinner=False)
-def _get_engine(model_type: str, chunking_strategy: str = "combined", use_reranking: bool = True):
-    if BACKEND_IMPORT_ERROR:
-        raise RuntimeError(BACKEND_IMPORT_ERROR)
-    engine = RAGEngine(
-        model_type=model_type,
-        chunking_strategy=chunking_strategy,
-        use_reranking=use_reranking,
-    )
-    if engine.collection.count() == 0:
-        engine.ingest_documents()
-    return engine
-
-
-def _call_ollama(model: str, prompt: str, images_b64=None, timeout: int = 90) -> str:
-    import requests
-
-    images_b64 = images_b64 or []
-    endpoints = [
-        "http://localhost:11434/api/generate",
-        "http://localhost:11434/api/chat",
-        "http://localhost:11434/v1/chat/completions",
-    ]
-    last_error = None
-
-    for endpoint in endpoints:
-        try:
-            if endpoint.endswith("/api/generate"):
-                payload = {"model": model, "prompt": prompt, "stream": False}
-                if images_b64:
-                    payload["images"] = images_b64
-            elif endpoint.endswith("/api/chat"):
-                payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False}
-                if images_b64:
-                    payload["images"] = images_b64
-            else:
-                payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False}
-
-            response = requests.post(endpoint, json=payload, timeout=timeout)
-            response.raise_for_status()
-            data = response.json()
-
-            if endpoint.endswith("/api/generate"):
-                return data.get("response", "")
-            if endpoint.endswith("/api/chat"):
-                return data.get("message", {}).get("content", "")
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        except Exception as e:
-            last_error = e
-            continue
-
-    raise RuntimeError(f"Ollama call failed for model '{model}': {last_error}")
-
-
-def _build_limited_docs(engine, query: str, subset_n: int = 60, top_k: int = 5):
-    limited_name = f"{engine.collection.name}_limited_{uuid.uuid4().hex[:8]}"
-    try:
-        subset = engine.collection.get(include=["embeddings", "documents", "metadatas"], limit=subset_n)
-        subset_embeddings = subset.get("embeddings")
-        subset_docs = subset.get("documents")
-        subset_metas = subset.get("metadatas")
-        if not subset_embeddings or not subset_docs or not subset_metas:
-            return []
-
-        limited_collection = engine.chroma_client.create_collection(
-            name=limited_name,
-            metadata={"hnsw:space": "cosine"},
-        )
-        limited_ids = [f"{limited_name}_{i}" for i in range(len(subset_docs))]
-        limited_collection.add(
-            ids=limited_ids,
-            embeddings=subset_embeddings,
-            documents=subset_docs,
-            metadatas=subset_metas,
-        )
-
-        query_embedding = engine.doc_processor.embedding_model.encode(query, convert_to_numpy=True).tolist()
-        result = limited_collection.query(query_embeddings=[query_embedding], n_results=min(top_k, len(limited_ids)))
-        docs = []
-        for i in range(len(result["ids"][0])):
-            docs.append({
-                "id": result["ids"][0][i],
-                "content": result["documents"][0][i],
-                "metadata": result["metadatas"][0][i],
-                "distance": result["distances"][0][i],
-                "similarity": 1 - result["distances"][0][i],
-            })
-        return docs
-    finally:
-        try:
-            engine.chroma_client.delete_collection(name=limited_name)
-        except Exception:
-            pass
-
-
-def _run_live_demo1():
-    question = "What are good dog breeds for families with children?"
-    text_engine = _get_engine("text_only", chunking_strategy="combined", use_reranking=True)
-
-    no_rag_response = _call_ollama(model="llama3.2:latest", prompt=question)
-    retrieved_docs = text_engine.retrieve(question, top_k=5)
-    expanded_docs = text_engine.rerank(question, retrieved_docs, top_n=5)
-    expanded_answer = text_engine.generate_answer(question, expanded_docs[:3], include_images=False).get("answer", "")
-
-    limited_docs_raw = _build_limited_docs(text_engine, question, subset_n=60, top_k=5)
-    limited_docs = text_engine.rerank(question, limited_docs_raw, top_n=min(3, len(limited_docs_raw))) if limited_docs_raw else []
-    limited_answer = text_engine.generate_answer(question, limited_docs, include_images=False).get("answer", "") if limited_docs else "[Limited RAG unavailable]"
-
-    comparison_df = pd.DataFrame({
-        "Scenario": ["Sin RAG", "Con RAG (BD base/no suficiente)", "Con RAG (BD expandida)"],
-        "Retrieved docs": [0, len(limited_docs), len(expanded_docs)],
-        "Top breeds used": ["N/A", _top_breeds(limited_docs), _top_breeds(expanded_docs)],
-        "Answer words": [_wc(no_rag_response), _wc(limited_answer), _wc(expanded_answer)],
-    })
-
-    return {
-        "question": question,
-        "no_rag_response": no_rag_response,
-        "limited_response": limited_answer,
-        "expanded_response": expanded_answer,
-        "retrieved_docs": retrieved_docs,
-        "expanded_docs": expanded_docs,
-        "comparison_df": comparison_df,
-    }
-
-
-def _run_live_demo2():
-    comparison_query = "Identify this dog breed from image only. Provide top guess, alternatives, and confidence."
-    mm_engine = _get_engine("multimodal", chunking_strategy="combined", use_reranking=True)
-
-    image_paths = []
-    for name in ["nami1.jpeg", "nami2.jpeg", "nami3.jpeg"]:
-        image_file = Path("demo_images") / name
-        if image_file.exists():
-            image_paths.append(image_file)
-    images_b64 = [_encode_image_b64(p) for p in image_paths[:2]]
-    if not images_b64:
-        raise RuntimeError("No Nami images found in demo_images/")
-
-    vision_prompt = (
-        "Identify the dog breed in these images. Provide top guess, alternatives, and confidence. "
-        "Describe visible features only."
-    )
-    no_rag_vision = _call_ollama(model="llava", prompt=vision_prompt, images_b64=images_b64)
-    retrieval_query = f"{comparison_query}\n\nVision analysis:\n{no_rag_vision}"
-
-    expanded_retrieved_docs = mm_engine.retrieve(retrieval_query, top_k=5)
-    expanded_docs = mm_engine.rerank(retrieval_query, expanded_retrieved_docs, top_n=5)
-    expanded_answer = mm_engine.generate_answer(
-        query=f"{comparison_query}\n\nUse this visual analysis of Nami:\n{no_rag_vision}",
-        context_documents=expanded_docs[:3],
-        include_images=False,
-    ).get("answer", "")
-
-    limited_docs_raw = _build_limited_docs(mm_engine, retrieval_query, subset_n=60, top_k=5)
-    limited_docs = mm_engine.rerank(retrieval_query, limited_docs_raw, top_n=min(3, len(limited_docs_raw))) if limited_docs_raw else []
-    limited_answer = mm_engine.generate_answer(
-        query=f"{comparison_query}\n\nUse this visual analysis of Nami:\n{no_rag_vision}",
-        context_documents=limited_docs,
-        include_images=False,
-    ).get("answer", "") if limited_docs else "[Limited RAG unavailable]"
-
-    comparison_df = pd.DataFrame({
-        "Scenario": ["Sin RAG (vision-only)", "Con RAG (BD no suficiente)", "Con RAG (BD expandida)"],
-        "Retrieved docs": [0, len(limited_docs), len(expanded_docs)],
-        "Top breeds used": ["N/A", _top_breeds(limited_docs), _top_breeds(expanded_docs)],
-        "Answer words": [_wc(no_rag_vision), _wc(limited_answer), _wc(expanded_answer)],
-    })
-
-    return {
-        "query": comparison_query,
-        "no_rag_response": no_rag_vision,
-        "limited_response": limited_answer,
-        "expanded_response": expanded_answer,
-        "retrieved_docs": expanded_retrieved_docs,
-        "expanded_docs": expanded_docs,
-        "comparison_df": comparison_df,
-    }
-
-
-def _build_simple_eval(demo1_result, demo2_result):
-    # Demo 1
-    q1_expected = {"beagle", "golden retriever", "labrador retriever"}
-    q1_docs = demo1_result.get("retrieved_docs", [])
-    q1_breeds = [d.get("metadata", {}).get("breed", "") for d in q1_docs]
-    q1_topk = min(5, len(q1_breeds))
-    q1_hit = int(any(_norm(b) in q1_expected for b in q1_breeds[:q1_topk])) if q1_topk else 0
-    q1_precision = (sum(1 for b in q1_breeds[:q1_topk] if _norm(b) in q1_expected) / q1_topk) if q1_topk else 0.0
-    q1_top_sim = max([float(d.get("similarity", 0.0)) for d in q1_docs], default=0.0)
-    q1_answer_coverage = int(_contains_any(demo1_result.get("expanded_response", ""), q1_breeds[:q1_topk]))
-
-    # Demo 2
-    q2_expected = {"siberian husky"}
-    q2_docs = demo2_result.get("retrieved_docs", [])
-    q2_breeds = [d.get("metadata", {}).get("breed", "") for d in q2_docs]
-    q2_topk = min(5, len(q2_breeds))
-    q2_hit = int(any(_norm(b) in q2_expected for b in q2_breeds[:q2_topk])) if q2_topk else 0
-    q2_precision = (sum(1 for b in q2_breeds[:q2_topk] if _norm(b) in q2_expected) / q2_topk) if q2_topk else 0.0
-    q2_top_sim = max([float(d.get("similarity", 0.0)) for d in q2_docs], default=0.0)
-    q2_answer_coverage = int(_contains_any(demo2_result.get("expanded_response", ""), q2_breeds[:q2_topk]))
-
-    return pd.DataFrame([
-        {"Scenario": "Demo 1 - Family query", "Hit@k": q1_hit, "Precision@k": round(q1_precision, 3), "Top similarity": round(q1_top_sim, 3), "Answer coverage": q1_answer_coverage},
-        {"Scenario": "Demo 2 - Nami query", "Hit@k": q2_hit, "Precision@k": round(q2_precision, 3), "Top similarity": round(q2_top_sim, 3), "Answer coverage": q2_answer_coverage},
-    ])
 
 # Main tabs - Now with TWO separate demos
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -456,37 +212,17 @@ with tab1:
     st.divider()
     st.subheader("🧪 3-Way Comparison (Demo 1)")
     st.caption("No RAG vs RAG with base DB vs RAG with expanded DB")
-    if st.button("Run live Demo 1", key="run_live_demo1"):
-        try:
-            with st.spinner("Running Demo 1 with real RAG pipeline..."):
-                st.session_state["live_demo1"] = _run_live_demo1()
-            st.success("Live Demo 1 completed.")
-        except Exception as e:
-            st.error(f"Live Demo 1 failed: {e}")
-            st.caption(traceback.format_exc())
-
-    if "live_demo1" in st.session_state:
-        live_demo1 = st.session_state["live_demo1"]
-        st.dataframe(live_demo1["comparison_df"], use_container_width=True, hide_index=True)
-        with st.expander("View live responses (Demo 1)", expanded=False):
-            st.markdown("**[Sin RAG]**")
-            st.write(live_demo1["no_rag_response"])
-            st.markdown("**[Con RAG - BD base/no suficiente]**")
-            st.write(live_demo1["limited_response"])
-            st.markdown("**[Con RAG - BD expandida]**")
-            st.write(live_demo1["expanded_response"])
-    else:
-        comparison_demo1 = pd.DataFrame({
-            "Scenario": ["Sin RAG", "Con RAG (BD base/no suficiente)", "Con RAG (BD expandida)"],
-            "Retrieved docs": [0, 5, 5],
-            "Top breeds used": [
-                "N/A",
-                "Border Terrier, Flat-Coated Retriever, Toy Poodle",
-                "Border Terrier, Flat-Coated Retriever, Toy Poodle",
-            ],
-            "Answer words": [30, 86, 71],
-        })
-        st.dataframe(comparison_demo1, use_container_width=True, hide_index=True)
+    comparison_demo1 = pd.DataFrame({
+        "Scenario": ["No RAG", "RAG (Base DB / limited)", "RAG (Expanded DB)"],
+        "Retrieved docs": [0, 5, 5],
+        "Top breeds used": [
+            "N/A",
+            "Border Terrier, Flat-Coated Retriever, Toy Poodle",
+            "Border Terrier, Flat-Coated Retriever, Toy Poodle",
+        ],
+        "Answer words": [30, 86, 71],
+    })
+    st.dataframe(comparison_demo1, use_container_width=True, hide_index=True)
 
 # ==================== TAB 2: Demo 2 - Nami Breed Identification ====================
 with tab2:
@@ -686,37 +422,17 @@ with tab2:
     st.divider()
     st.subheader("🧪 3-Way Comparison (Demo 2)")
     st.caption("No RAG (vision-only) vs limited RAG subset vs expanded RAG")
-    if st.button("Run live Demo 2", key="run_live_demo2"):
-        try:
-            with st.spinner("Running Demo 2 with real vision + retrieval pipeline..."):
-                st.session_state["live_demo2"] = _run_live_demo2()
-            st.success("Live Demo 2 completed.")
-        except Exception as e:
-            st.error(f"Live Demo 2 failed: {e}")
-            st.caption(traceback.format_exc())
-
-    if "live_demo2" in st.session_state:
-        live_demo2 = st.session_state["live_demo2"]
-        st.dataframe(live_demo2["comparison_df"], use_container_width=True, hide_index=True)
-        with st.expander("View live responses (Demo 2)", expanded=False):
-            st.markdown("**[Sin RAG - vision-only]**")
-            st.write(live_demo2["no_rag_response"])
-            st.markdown("**[Con RAG - BD no suficiente]**")
-            st.write(live_demo2["limited_response"])
-            st.markdown("**[Con RAG - BD expandida]**")
-            st.write(live_demo2["expanded_response"])
-    else:
-        comparison_demo2 = pd.DataFrame({
-            "Scenario": ["Sin RAG (vision-only)", "Con RAG (BD no suficiente)", "Con RAG (BD expandida)"],
-            "Retrieved docs": [0, 3, 5],
-            "Top breeds used": [
-                "N/A",
-                "Alaskan Malamute, Samoyed, Akita",
-                "Siberian Husky, Alaskan Malamute, Samoyed",
-            ],
-            "Answer words": [69, 89, 146],
-        })
-        st.dataframe(comparison_demo2, use_container_width=True, hide_index=True)
+    comparison_demo2 = pd.DataFrame({
+        "Scenario": ["No RAG (vision-only)", "RAG (Base DB / limited)", "RAG (Expanded DB)"],
+        "Retrieved docs": [0, 3, 5],
+        "Top breeds used": [
+            "N/A",
+            "Alaskan Malamute, Samoyed, Akita",
+            "Siberian Husky, Alaskan Malamute, Samoyed",
+        ],
+        "Answer words": [69, 89, 146],
+    })
+    st.dataframe(comparison_demo2, use_container_width=True, hide_index=True)
 
     # Mini comparison chart
     st.divider()
@@ -787,15 +503,11 @@ with tab3:
 
     st.divider()
 
-    if "live_demo1" in st.session_state and "live_demo2" in st.session_state:
-        simple_eval_df = _build_simple_eval(st.session_state["live_demo1"], st.session_state["live_demo2"])
-        st.success("Using live metrics computed from current RAG runs in Demo 1 and Demo 2.")
-    else:
-        simple_eval_df = pd.DataFrame([
-            {"Scenario": "Demo 1 - Family query", "Hit@k": 0.0, "Precision@k": 0.0, "Top similarity": 0.487, "Answer coverage": 1.0},
-            {"Scenario": "Demo 2 - Nami query", "Hit@k": 1.0, "Precision@k": 0.2, "Top similarity": 0.720, "Answer coverage": 1.0},
-        ])
-        st.info("Showing notebook baseline values. Run both live demos to update this with real-time metrics.")
+    simple_eval_df = pd.DataFrame([
+        {"Scenario": "Demo 1 - Family query", "Hit@k": 0.0, "Precision@k": 0.0, "Top similarity": 0.487, "Answer coverage": 1.0},
+        {"Scenario": "Demo 2 - Nami query", "Hit@k": 1.0, "Precision@k": 0.2, "Top similarity": 0.720, "Answer coverage": 1.0},
+    ])
+    st.info("Notebook baseline values are shown here as fixed demo outputs.")
 
     metrics = ["Hit@k", "Precision@k", "Top similarity", "Answer coverage"]
     fig = go.Figure()

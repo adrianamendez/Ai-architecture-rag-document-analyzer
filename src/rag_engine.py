@@ -5,11 +5,9 @@ Supports both text-only and multimodal RAG strategies.
 
 import json
 import logging
-from typing import List, Dict, Any, Optional, Tuple
-from pathlib import Path
+from typing import List, Dict, Any, Optional
 
 import chromadb
-from chromadb.config import Settings
 import requests
 from sentence_transformers import CrossEncoder
 
@@ -20,7 +18,7 @@ from config import (
     MODELS,
     PROMPTS,
 )
-from document_processor import Document, DocumentProcessor
+from document_processor import DocumentProcessor
 
 logger = logging.getLogger(__name__)
 

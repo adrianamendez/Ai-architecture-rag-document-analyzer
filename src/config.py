@@ -3,7 +3,6 @@ Configuration module for RAG Dog Breed Analyzer.
 Contains all settings for Ollama models, paths, and parameters.
 """
 
-import os
 from pathlib import Path
 from typing import Dict, Any
 

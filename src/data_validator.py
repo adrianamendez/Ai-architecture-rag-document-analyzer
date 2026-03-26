@@ -2,8 +2,6 @@
 CSV validation helpers for notebook/app ingestion.
 """
 
-from __future__ import annotations
-
 from typing import Dict, List, Tuple
 import re
 
@@ -66,4 +64,3 @@ def validate_base_and_ranking(base_df: pd.DataFrame, ranking_df: pd.DataFrame) -
         "base_csv": validate_csv(base_df, BASE_REQUIRED_COLUMNS, "base_csv"),
         "ranking_csv": validate_csv(ranking_df, RANKING_REQUIRED_COLUMNS, "ranking_csv"),
     }
-

@@ -314,20 +314,6 @@ class DocumentProcessor:
         logger.info("Embeddings generated successfully")
         return documents
 
-    def get_image_base64(self, image_path: Path) -> str:
-        """
-        Convert image to base64 string for LLaVA.
-
-        Args:
-            image_path: Path to image file
-
-        Returns:
-            Base64 encoded image string
-        """
-        with open(image_path, 'rb') as f:
-            image_data = f.read()
-        return base64.b64encode(image_data).decode('utf-8')
-
     def process_image_for_vision_model(self, image_path: Path) -> Dict[str, Any]:
         """
         Process image for vision model input.

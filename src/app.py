@@ -5,7 +5,6 @@ Interactive interface for querying, evaluating, and visualizing multimodal RAG.
 
 import streamlit as st
 import json
-from pathlib import Path
 import pandas as pd
 import time
 
@@ -18,7 +17,6 @@ from config import (
     check_ollama_available,
 )
 from rag_engine import RAGEngine
-from document_processor import DocumentProcessor
 from evaluator import RAGEvaluator
 from visualizer import RAGVisualizer
 from eval_dataset_generator import EvalDatasetGenerator
