@@ -5,6 +5,7 @@ Handles ingestion of images and text, applies chunking strategies, and generates
 
 import json
 import base64
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import logging
@@ -68,11 +69,43 @@ class DocumentProcessor:
         self.breed_data = self._load_breed_data()
         logger.info(f"Loaded {len(self.breed_data)} breeds")
 
+    @staticmethod
+    def _slug(value: str) -> str:
+        """Create a safe, stable slug for IDs."""
+        slug = re.sub(r'[^a-z0-9]+', '_', str(value).lower()).strip('_')
+        return slug or "unknown"
+
+    def _make_doc_id(self, breed_name: str, breed_info: Dict[str, Any], suffix: str) -> str:
+        """
+        Build a stable unique document ID.
+        Includes image folder to avoid collisions when breed names are duplicated.
+        """
+        breed_slug = self._slug(breed_name)
+        folder_slug = self._slug(breed_info.get('image_folder', 'unknown_folder'))
+        source_idx = breed_info.get('source_index', 'na')
+        return f"{breed_slug}__{folder_slug}__src{source_idx}__{suffix}"
+
     def _load_breed_data(self) -> Dict[str, Any]:
         """Load breed mapping data."""
         with open(BREED_MAPPING_FILE, 'r') as f:
             data = json.load(f)
-        return {breed['name']: breed for breed in data['breeds']}
+
+        # Preserve duplicate breed names by creating unique keys for subsequent rows.
+        # First row keeps the plain name for backward compatibility with .get("Breed Name").
+        breed_map: Dict[str, Any] = {}
+        seen: Dict[str, int] = {}
+        for idx, breed in enumerate(data['breeds']):
+            name = breed['name']
+            seen[name] = seen.get(name, 0) + 1
+            unique_key = name if seen[name] == 1 else f"{name}__{seen[name]}"
+
+            enriched = dict(breed)
+            enriched['canonical_name'] = name
+            enriched['source_index'] = idx
+            enriched['unique_key'] = unique_key
+            breed_map[unique_key] = enriched
+
+        return breed_map
 
     def process_all_breeds(self) -> List[Document]:
         """
@@ -102,12 +135,14 @@ class DocumentProcessor:
         Returns:
             List of Document objects for this breed
         """
+        canonical_name = breed_info.get('canonical_name', breed_name)
+
         if self.chunking_strategy == "fixed_size":
-            return self._chunk_fixed_size(breed_name, breed_info)
+            return self._chunk_fixed_size(canonical_name, breed_info)
         elif self.chunking_strategy == "semantic":
-            return self._chunk_semantic(breed_name, breed_info)
+            return self._chunk_semantic(canonical_name, breed_info)
         else:  # combined
-            return self._chunk_combined(breed_name, breed_info)
+            return self._chunk_combined(canonical_name, breed_info)
 
     def _chunk_fixed_size(
         self, breed_name: str, breed_info: Dict[str, Any]
@@ -125,21 +160,28 @@ class DocumentProcessor:
         for key, value in characteristics.items():
             full_text += f"{key}: {value}\n"
 
-        # Fixed size chunking
+        # Approx token-based chunking (whitespace tokenization).
         chunk_size = self.strategy_config.get('chunk_size', 512)
         chunk_overlap = self.strategy_config.get('chunk_overlap', 50)
+        step = max(1, chunk_size - chunk_overlap)
+        tokens = full_text.split()
 
-        for i in range(0, len(full_text), chunk_size - chunk_overlap):
-            chunk = full_text[i:i + chunk_size]
-            if len(chunk.strip()) > 0:
+        for i in range(0, len(tokens), step):
+            chunk_tokens = tokens[i:i + chunk_size]
+            if chunk_tokens:
+                chunk = " ".join(chunk_tokens)
+                chunk_id = i // step
                 doc = Document(
                     content=chunk,
                     metadata={
                         'breed': breed_name,
-                        'chunk_id': i // (chunk_size - chunk_overlap),
+                        'chunk_id': chunk_id,
                         'chunk_strategy': 'fixed_size',
                         'image_folder': breed_info['image_folder'],
-                    }
+                        'token_start': i,
+                        'token_end': i + len(chunk_tokens),
+                    },
+                    doc_id=self._make_doc_id(breed_name, breed_info, f"fixed_{chunk_id}")
                 )
                 documents.append(doc)
 
@@ -156,31 +198,39 @@ class DocumentProcessor:
         documents = []
         characteristics = breed_info['characteristics']
 
-        # Create one chunk per major attribute
-        attribute_groups = {
-            'identity': ['Breed', 'Country of Origin'],
-            'physical': ['Fur Color', 'Height (in)', 'Color of Eyes'],
-            'behavior': ['Character Traits', 'Longevity (yrs)'],
-            'health': ['Common Health Problems'],
-        }
+        # Create sentence-level semantic units, then window by sentence count.
+        semantic_sentences = []
+        for attr, value in characteristics.items():
+            if str(value).strip():
+                semantic_sentences.append(f"{attr}: {value}.")
 
-        for group_name, attributes in attribute_groups.items():
-            chunk_text = f"Breed: {breed_name}\n"
-            for attr in attributes:
-                if attr in characteristics:
-                    chunk_text += f"{attr}: {characteristics[attr]}\n"
+        if not semantic_sentences:
+            return documents
 
-            if len(chunk_text.strip()) > len(f"Breed: {breed_name}\n"):
-                doc = Document(
-                    content=chunk_text,
-                    metadata={
-                        'breed': breed_name,
-                        'attribute_group': group_name,
-                        'chunk_strategy': 'semantic',
-                        'image_folder': breed_info['image_folder'],
-                    }
-                )
-                documents.append(doc)
+        max_sentences = self.strategy_config.get('max_sentences_per_chunk', 3)
+        sentence_overlap = self.strategy_config.get('sentence_overlap', 1)
+        step = max(1, max_sentences - sentence_overlap)
+
+        for i in range(0, len(semantic_sentences), step):
+            chunk_sentences = semantic_sentences[i:i + max_sentences]
+            if not chunk_sentences:
+                continue
+
+            chunk_id = i // step
+            chunk_text = f"Breed: {breed_name}\n" + "\n".join(chunk_sentences)
+            doc = Document(
+                content=chunk_text,
+                metadata={
+                    'breed': breed_name,
+                    'chunk_id': chunk_id,
+                    'chunk_strategy': 'semantic',
+                    'image_folder': breed_info['image_folder'],
+                    'sentence_start': i,
+                    'sentence_end': i + len(chunk_sentences),
+                },
+                doc_id=self._make_doc_id(breed_name, breed_info, f"semantic_{chunk_id}")
+            )
+            documents.append(doc)
 
         return documents
 
@@ -217,12 +267,14 @@ class DocumentProcessor:
             content=chunk_text,
             metadata={
                 'breed': breed_name,
+                'chunk_id': 0,
                 'chunk_strategy': 'combined',
                 'image_folder': breed_info['image_folder'],
                 'image_count': len(image_paths),
                 'image_paths': [str(p) for p in image_paths],
                 'characteristics': characteristics,
-            }
+            },
+            doc_id=self._make_doc_id(breed_name, breed_info, "combined_0")
         )
 
         return [doc]

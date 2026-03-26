@@ -5,6 +5,7 @@ Implements faithfulness, answer relevancy, context precision, and context recall
 
 import json
 import logging
+import os
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import numpy as np
@@ -17,8 +18,11 @@ from ragas.metrics import (
     context_precision,
     context_recall,
 )
+from ragas.llms import LangchainLLMWrapper
+from ragas.embeddings import LangchainEmbeddingsWrapper
+from ragas.run_config import RunConfig
 
-from config import EVAL_DIR, RAGAS_METRICS
+from config import EVAL_DIR, RAGAS_METRICS, OLLAMA_BASE_URL
 from rag_engine import RAGEngine
 
 logger = logging.getLogger(__name__)
@@ -27,12 +31,19 @@ logger = logging.getLogger(__name__)
 class RAGEvaluator:
     """Evaluate RAG system using RAGAS metrics."""
 
-    def __init__(self, rag_engine: RAGEngine):
+    def __init__(
+        self,
+        rag_engine: RAGEngine,
+        ragas_llm: Optional[Any] = None,
+        ragas_embeddings: Optional[Any] = None,
+    ):
         """
         Initialize evaluator.
 
         Args:
             rag_engine: RAG engine instance to evaluate
+            ragas_llm: Optional preconfigured RAGAS LLM backend
+            ragas_embeddings: Optional preconfigured RAGAS embeddings backend
         """
         self.rag_engine = rag_engine
         self.metrics = {
@@ -41,6 +52,51 @@ class RAGEvaluator:
             'context_precision': context_precision,
             'context_recall': context_recall,
         }
+        self.ragas_llm = ragas_llm
+        self.ragas_embeddings = ragas_embeddings
+
+        # If not explicitly provided, try to use local Ollama backends.
+        if self.ragas_llm is None or self.ragas_embeddings is None:
+            llm, emb = self._create_ollama_ragas_backends()
+            self.ragas_llm = self.ragas_llm or llm
+            self.ragas_embeddings = self.ragas_embeddings or emb
+        logger.info(
+            "RAGAS backends -> llm: %s, embeddings: %s",
+            type(self.ragas_llm).__name__ if self.ragas_llm is not None else "None",
+            type(self.ragas_embeddings).__name__ if self.ragas_embeddings is not None else "None",
+        )
+
+    def _create_ollama_ragas_backends(self) -> tuple[Optional[Any], Optional[Any]]:
+        """
+        Build RAGAS-compatible wrappers for Ollama via langchain-ollama.
+        Returns (llm_wrapper, embeddings_wrapper) or (None, None) if unavailable.
+        """
+        try:
+            from langchain_ollama import ChatOllama, OllamaEmbeddings
+        except Exception as e:
+            logger.warning(f"langchain-ollama not available; RAGAS may fallback to OpenAI defaults: {e}")
+            return None, None
+
+        try:
+            # llama3 is generally more reliable than llama3.2 for strict JSON outputs.
+            llm_model = os.getenv("RAGAS_OLLAMA_LLM", "llama3:latest")
+            embed_model = os.getenv("RAGAS_OLLAMA_EMBEDDINGS", "nomic-embed-text")
+
+            lc_llm = ChatOllama(
+                model=llm_model,
+                base_url=OLLAMA_BASE_URL,
+                temperature=0.0,
+                format="json",
+            )
+            lc_embeddings = OllamaEmbeddings(
+                model=embed_model,
+                base_url=OLLAMA_BASE_URL,
+            )
+
+            return LangchainLLMWrapper(lc_llm), LangchainEmbeddingsWrapper(lc_embeddings)
+        except Exception as e:
+            logger.warning(f"Could not initialize Ollama RAGAS backends: {e}")
+            return None, None
 
     def evaluate_single_query(
         self,
@@ -125,15 +181,66 @@ class RAGEvaluator:
 
         # Run RAGAS evaluation
         try:
-            ragas_results = evaluate(dataset, metrics=metrics_to_use)
+            if self.ragas_llm is None or self.ragas_embeddings is None:
+                raise RuntimeError(
+                    "RAGAS local backends are not configured. "
+                    "Install `langchain-ollama` and ensure Ollama is running with "
+                    "`llama3.2` and `nomic-embed-text` pulled."
+                )
 
-            # Extract scores
-            scores = {
-                'faithfulness': ragas_results.get('faithfulness', 0.0),
-                'answer_relevancy': ragas_results.get('answer_relevancy', 0.0),
-                'context_precision': ragas_results.get('context_precision', 0.0),
-                'context_recall': ragas_results.get('context_recall', 0.0),
-            }
+            allow_nest_asyncio = os.getenv("RAGAS_ALLOW_NEST_ASYNCIO", "true").lower() == "true"
+
+            try:
+                run_config = RunConfig(
+                    timeout=int(os.getenv("RAGAS_TIMEOUT_SEC", "240")),
+                    max_workers=int(os.getenv("RAGAS_MAX_WORKERS", "1")),
+                    max_retries=int(os.getenv("RAGAS_MAX_RETRIES", "2")),
+                )
+                ragas_results = evaluate(
+                    dataset,
+                    metrics=metrics_to_use,
+                    llm=self.ragas_llm,
+                    embeddings=self.ragas_embeddings,
+                    # In notebooks, an event loop is usually already running.
+                    allow_nest_asyncio=allow_nest_asyncio,
+                    raise_exceptions=False,
+                    run_config=run_config,
+                )
+            except RuntimeError as nested_err:
+                # Fallback for environments where nest_asyncio introduces context issues.
+                if "cannot enter context" in str(nested_err).lower():
+                    run_config = RunConfig(
+                        timeout=int(os.getenv("RAGAS_TIMEOUT_SEC", "240")),
+                        max_workers=int(os.getenv("RAGAS_MAX_WORKERS", "1")),
+                        max_retries=int(os.getenv("RAGAS_MAX_RETRIES", "2")),
+                    )
+                    ragas_results = evaluate(
+                        dataset,
+                        metrics=metrics_to_use,
+                        llm=self.ragas_llm,
+                        embeddings=self.ragas_embeddings,
+                        allow_nest_asyncio=False,
+                        raise_exceptions=False,
+                        run_config=run_config,
+                    )
+                else:
+                    raise
+
+            # Extract scores robustly across ragas versions.
+            metric_names = ['faithfulness', 'answer_relevancy', 'context_precision', 'context_recall']
+            scores = {m: 0.0 for m in metric_names}
+
+            if isinstance(ragas_results, dict):
+                for m in metric_names:
+                    scores[m] = float(ragas_results.get(m, 0.0) or 0.0)
+            elif hasattr(ragas_results, "to_pandas"):
+                df_scores = ragas_results.to_pandas()
+                for m in metric_names:
+                    if m in df_scores.columns:
+                        scores[m] = float(df_scores[m].dropna().mean())
+            elif hasattr(ragas_results, "scores") and isinstance(ragas_results.scores, dict):
+                for m in metric_names:
+                    scores[m] = float(ragas_results.scores.get(m, 0.0) or 0.0)
 
             # Calculate average score
             scores['average'] = np.mean(list(scores.values()))

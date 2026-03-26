@@ -67,11 +67,12 @@ CHUNKING_STRATEGIES = {
     "fixed_size": {
         "chunk_size": 512,
         "chunk_overlap": 50,
-        "description": "Fixed size chunks with overlap"
+        "description": "Approx token-based chunks with overlap"
     },
     "semantic": {
-        "by_attribute": True,
-        "description": "Chunk by breed attributes (one chunk per characteristic)"
+        "max_sentences_per_chunk": 3,
+        "sentence_overlap": 1,
+        "description": "Sentence-aware chunks built from breed attribute statements"
     },
     "combined": {
         "description": "Combine text + image metadata into single chunk"
