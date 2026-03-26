@@ -56,6 +56,7 @@ class RAGEngine:
 
         # Collection name based on strategy
         collection_name = f"{CHROMA_CONFIG['collection_name']}_{chunking_strategy}"
+        image_collection_name = f"{collection_name}_images"
 
         # Get or create collection
         try:
@@ -69,6 +70,20 @@ class RAGEngine:
                 metadata={"hnsw:space": CHROMA_CONFIG['distance_metric']}
             )
             logger.info(f"Created new collection: {collection_name}")
+
+        # Separate image embedding collection for multimodal retrieval.
+        # It is created for every engine to keep ingestion/query logic consistent.
+        try:
+            self.image_collection = self.chroma_client.get_collection(
+                name=image_collection_name
+            )
+            logger.info(f"Loaded existing image collection: {image_collection_name}")
+        except:
+            self.image_collection = self.chroma_client.create_collection(
+                name=image_collection_name,
+                metadata={"hnsw:space": CHROMA_CONFIG['distance_metric']}
+            )
+            logger.info(f"Created image collection: {image_collection_name}")
 
         # Initialize reranker if enabled
         self.reranker = None
@@ -106,19 +121,36 @@ class RAGEngine:
         Returns:
             Number of documents ingested
         """
-        # Check if collection already has documents
-        if self.collection.count() > 0 and not force_rebuild:
-            logger.info(f"Collection already has {self.collection.count()} documents")
-            return self.collection.count()
-
         if force_rebuild:
-            logger.info("Force rebuild: Deleting existing collection")
-            collection_name = self.collection.name
-            self.chroma_client.delete_collection(name=collection_name)
+            logger.info("Force rebuild: Deleting existing collections")
+            text_collection_name = self.collection.name
+            image_collection_name = self.image_collection.name
+            self.chroma_client.delete_collection(name=text_collection_name)
+            self.chroma_client.delete_collection(name=image_collection_name)
             self.collection = self.chroma_client.create_collection(
-                name=collection_name,
+                name=text_collection_name,
                 metadata={"hnsw:space": CHROMA_CONFIG['distance_metric']}
             )
+            self.image_collection = self.chroma_client.create_collection(
+                name=image_collection_name,
+                metadata={"hnsw:space": CHROMA_CONFIG['distance_metric']}
+            )
+
+        text_count = self.collection.count()
+        image_count = self.image_collection.count()
+
+        # Both collections already available.
+        if text_count > 0 and image_count > 0 and not force_rebuild:
+            logger.info(
+                f"Collections already populated (text={text_count}, image={image_count})"
+            )
+            return text_count
+
+        # Text already available; only image vectors missing.
+        if text_count > 0 and image_count == 0 and not force_rebuild:
+            logger.info("Text collection already populated; ingesting missing image vectors only")
+            self._ingest_image_vectors()
+            return text_count
 
         logger.info("Processing all breed documents...")
         documents = self.doc_processor.process_all_breeds()
@@ -146,7 +178,40 @@ class RAGEngine:
             )
 
         logger.info(f"✓ Ingested {len(documents)} documents successfully")
+
+        # Ingest image vectors for multimodal retrieval.
+        if self.image_collection.count() == 0:
+            self._ingest_image_vectors()
+
         return len(documents)
+
+    def _ingest_image_vectors(self) -> int:
+        """Ingest CLIP image embeddings into dedicated image collection."""
+        logger.info("Processing image entries for multimodal indexing...")
+        image_entries = self.doc_processor.process_all_images_for_indexing(
+            max_images_per_breed=5
+        )
+        if not image_entries:
+            logger.warning("No image entries available to ingest")
+            return 0
+
+        ids = [entry["id"] for entry in image_entries]
+        embeddings = [entry["embedding"].tolist() for entry in image_entries]
+        documents_text = [entry["document"] for entry in image_entries]
+        metadatas = [self._sanitize_metadata(entry["metadata"]) for entry in image_entries]
+
+        batch_size = 100
+        for i in range(0, len(image_entries), batch_size):
+            batch_end = min(i + batch_size, len(image_entries))
+            self.image_collection.add(
+                ids=ids[i:batch_end],
+                embeddings=embeddings[i:batch_end],
+                documents=documents_text[i:batch_end],
+                metadatas=metadatas[i:batch_end],
+            )
+
+        logger.info(f"✓ Ingested {len(image_entries)} image vectors successfully")
+        return len(image_entries)
 
     def retrieve(
         self,
@@ -192,6 +257,100 @@ class RAGEngine:
 
         logger.info(f"Retrieved {len(documents)} documents")
         return documents
+
+    def retrieve_images(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve relevant image entries in CLIP space using text query.
+        """
+        if top_k is None:
+            top_k = RETRIEVAL_CONFIG["image_top_k"]
+
+        if self.image_collection.count() == 0:
+            logger.info("Image collection is empty; skipping image retrieval")
+            return []
+
+        query_embedding = self.doc_processor.encode_query_in_image_space(query)
+        results = self.image_collection.query(
+            query_embeddings=[query_embedding.tolist()],
+            n_results=top_k,
+        )
+
+        images = []
+        for i in range(len(results["ids"][0])):
+            images.append(
+                {
+                    "id": results["ids"][0][i],
+                    "content": results["documents"][0][i],
+                    "metadata": results["metadatas"][0][i],
+                    "distance": results["distances"][0][i],
+                    "similarity": 1 - results["distances"][0][i],
+                }
+            )
+        logger.info(f"Retrieved {len(images)} image entries")
+        return images
+
+    @staticmethod
+    def _normalize_scores(values: List[float]) -> List[float]:
+        if not values:
+            return []
+        v_min = min(values)
+        v_max = max(values)
+        if v_max == v_min:
+            return [1.0 for _ in values]
+        return [(v - v_min) / (v_max - v_min) for v in values]
+
+    def fuse_multimodal_results(
+        self,
+        text_docs: List[Dict[str, Any]],
+        image_docs: List[Dict[str, Any]],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fuse text and image retrieval by breed score, then return best text docs.
+        """
+        if not text_docs:
+            return []
+
+        text_weight = RETRIEVAL_CONFIG.get("text_weight", 0.7)
+        image_weight = RETRIEVAL_CONFIG.get("image_weight", 0.3)
+
+        text_scores = self._normalize_scores([float(d.get("similarity", 0.0)) for d in text_docs])
+        image_scores = self._normalize_scores([float(d.get("similarity", 0.0)) for d in image_docs])
+
+        breed_text_score: Dict[str, float] = {}
+        best_text_doc_by_breed: Dict[str, Dict[str, Any]] = {}
+        for doc, score in zip(text_docs, text_scores):
+            breed = doc.get("metadata", {}).get("breed", "Unknown")
+            if score > breed_text_score.get(breed, -1.0):
+                breed_text_score[breed] = score
+                best_text_doc_by_breed[breed] = doc
+
+        breed_image_score: Dict[str, float] = {}
+        for doc, score in zip(image_docs, image_scores):
+            breed = doc.get("metadata", {}).get("breed", "Unknown")
+            if score > breed_image_score.get(breed, -1.0):
+                breed_image_score[breed] = score
+
+        fused = []
+        for breed, text_score in breed_text_score.items():
+            image_score = breed_image_score.get(breed, 0.0)
+            fusion_score = text_weight * text_score + image_weight * image_score
+            doc = dict(best_text_doc_by_breed[breed])
+            doc["text_norm_score"] = float(text_score)
+            doc["image_norm_score"] = float(image_score)
+            doc["fusion_score"] = float(fusion_score)
+            fused.append(doc)
+
+        fused.sort(key=lambda x: x["fusion_score"], reverse=True)
+        logger.info(
+            f"Fused multimodal results: {len(fused)} breeds "
+            f"(text_weight={text_weight}, image_weight={image_weight})"
+        )
+        return fused[:top_k]
 
     def rerank(
         self,
@@ -402,9 +561,21 @@ class RAGEngine:
             Complete RAG response with answer and metadata
         """
         logger.info(f"Processing query: {question}")
+        if top_k is None:
+            top_k = RETRIEVAL_CONFIG["top_k"]
 
-        # Retrieve documents
-        documents = self.retrieve(query=question, top_k=top_k)
+        # Retrieve documents (text-only or fused multimodal)
+        if self.model_config.get("supports_vision", False):
+            text_docs = self.retrieve(query=question, top_k=max(top_k, RETRIEVAL_CONFIG["top_k"]))
+            image_docs = self.retrieve_images(query=question, top_k=RETRIEVAL_CONFIG["image_top_k"])
+            documents = self.fuse_multimodal_results(
+                text_docs=text_docs,
+                image_docs=image_docs,
+                top_k=top_k,
+            )
+        else:
+            documents = self.retrieve(query=question, top_k=top_k)
+            image_docs = []
 
         # Rerank if enabled
         if use_reranking is None:
@@ -418,8 +589,10 @@ class RAGEngine:
 
         # Add retrieval metadata
         result['retrieval_count'] = len(documents)
+        result['image_retrieval_count'] = len(image_docs)
         result['reranking_used'] = use_reranking
         result['chunking_strategy'] = self.chunking_strategy
+        result['multimodal_fusion_used'] = bool(self.model_config.get("supports_vision", False))
 
         return result
 
@@ -436,8 +609,10 @@ class RAGEngine:
 
         return {
             'total_documents': count,
+            'total_image_vectors': self.image_collection.count(),
             'unique_breeds': len(breeds),
             'collection_name': self.collection.name,
+            'image_collection_name': self.image_collection.name,
             'chunking_strategy': self.chunking_strategy,
             'distance_metric': CHROMA_CONFIG['distance_metric'],
         }

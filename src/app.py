@@ -120,6 +120,7 @@ def main():
             st.success("✓ RAG Engine Ready")
             stats = st.session_state.rag_engine.get_collection_stats()
             st.metric("Documents", stats['total_documents'])
+            st.metric("Image Vectors", stats.get('total_image_vectors', 0))
             st.metric("Unique Breeds", stats['unique_breeds'])
 
     # Main tabs
@@ -184,11 +185,12 @@ def main():
 
                     # Metadata
                     st.divider()
-                    col1, col2, col3, col4 = st.columns(4)
+                    col1, col2, col3, col4, col5 = st.columns(5)
                     col1.metric("Response Time", f"{elapsed_time:.2f}s")
                     col2.metric("Model", result['model'])
                     col3.metric("Docs Retrieved", result['retrieval_count'])
-                    col4.metric("Images Used", result.get('images_used', 0))
+                    col4.metric("Image Candidates", result.get('image_retrieval_count', 0))
+                    col5.metric("Images Used", result.get('images_used', 0))
 
                     # Retrieved contexts
                     with st.expander("📚 Retrieved Contexts"):
@@ -211,13 +213,13 @@ def main():
 
     # Tab 2: Evaluation
     with tab2:
-        st.header("RAGAS Evaluation")
+        st.header("RAG Evaluation")
 
         col1, col2 = st.columns([2, 1])
 
         with col1:
             st.markdown("""
-            Evaluate the RAG system using **RAGAS metrics**:
+            Evaluate the RAG system using **RAGAS metrics** and compare strategy performance:
             - **Faithfulness**: Is the answer grounded in retrieved context?
             - **Answer Relevancy**: Does the answer address the question?
             - **Context Precision**: Were the right documents retrieved?
@@ -272,7 +274,7 @@ def main():
                 )
 
                 if st.button("Run Evaluation"):
-                    with st.spinner("Running RAGAS evaluation (this may take a few minutes)..."):
+                    with st.spinner("Running evaluation (this may take a few minutes)..."):
                         # Load dataset
                         with open(eval_file, 'r') as f:
                             eval_dataset = json.load(f)

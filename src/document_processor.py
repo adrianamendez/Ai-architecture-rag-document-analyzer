@@ -64,10 +64,19 @@ class DocumentProcessor:
         # Load embedding model
         logger.info(f"Loading embedding model: {EMBEDDING_CONFIG['text_model']}")
         self.embedding_model = SentenceTransformer(EMBEDDING_CONFIG['text_model'])
+        self.image_embedding_model: Optional[SentenceTransformer] = None
 
         # Load breed data
         self.breed_data = self._load_breed_data()
         logger.info(f"Loaded {len(self.breed_data)} breeds")
+
+    def _get_image_embedding_model(self) -> SentenceTransformer:
+        """Lazy-load CLIP-style image/text embedding model for multimodal retrieval."""
+        if self.image_embedding_model is None:
+            model_name = EMBEDDING_CONFIG["multimodal_model"]
+            logger.info(f"Loading multimodal embedding model: {model_name}")
+            self.image_embedding_model = SentenceTransformer(model_name)
+        return self.image_embedding_model
 
     @staticmethod
     def _slug(value: str) -> str:
@@ -314,6 +323,88 @@ class DocumentProcessor:
         logger.info("Embeddings generated successfully")
         return documents
 
+    def encode_query_in_image_space(self, query: str) -> np.ndarray:
+        """
+        Embed text query in the shared CLIP image-text space.
+        """
+        model = self._get_image_embedding_model()
+        return model.encode(query, convert_to_numpy=True)
+
+    def process_all_images_for_indexing(
+        self,
+        max_images_per_breed: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Build image entries with CLIP embeddings for multimodal retrieval.
+
+        Returns:
+            List of dicts with: id, embedding, metadata, document
+        """
+        image_paths: List[Path] = []
+        image_meta: List[Dict[str, Any]] = []
+
+        for breed_name, breed_info in self.breed_data.items():
+            canonical_name = breed_info.get("canonical_name", breed_name)
+            folder = IMAGES_DIR / breed_info["image_folder"]
+            if not folder.exists():
+                continue
+
+            candidates: List[Path] = []
+            for pattern in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
+                candidates.extend(sorted(folder.glob(pattern)))
+
+            for idx, image_path in enumerate(candidates[:max_images_per_breed]):
+                image_paths.append(image_path)
+                image_meta.append(
+                    {
+                        "breed": canonical_name,
+                        "image_folder": breed_info.get("image_folder", ""),
+                        "source_index": breed_info.get("source_index", -1),
+                        "image_path": str(image_path),
+                        "image_index": idx,
+                    }
+                )
+
+        if not image_paths:
+            logger.warning("No images found for image indexing")
+            return []
+
+        logger.info(f"Generating image embeddings for {len(image_paths)} images...")
+        model = self._get_image_embedding_model()
+        pil_images = []
+        for path in image_paths:
+            with Image.open(path) as img:
+                pil_images.append(img.convert("RGB"))
+        embeddings = model.encode(
+            pil_images,
+            batch_size=EMBEDDING_CONFIG["batch_size"],
+            convert_to_numpy=True,
+            show_progress_bar=True,
+        )
+
+        entries: List[Dict[str, Any]] = []
+        for meta, embedding in zip(image_meta, embeddings):
+            image_slug = self._slug(Path(meta["image_path"]).stem)
+            image_id = (
+                f"img__{self._slug(meta['breed'])}__"
+                f"{self._slug(meta['image_folder'])}__"
+                f"src{meta['source_index']}__{image_slug}"
+            )
+            entries.append(
+                {
+                    "id": image_id,
+                    "embedding": embedding,
+                    "metadata": meta,
+                    "document": (
+                        f"Image evidence for breed: {meta['breed']}. "
+                        f"Path: {meta['image_path']}"
+                    ),
+                }
+            )
+
+        logger.info(f"Prepared {len(entries)} image entries for vector indexing")
+        return entries
+
     def process_image_for_vision_model(self, image_path: Path) -> Dict[str, Any]:
         """
         Process image for vision model input.
@@ -350,6 +441,19 @@ class DocumentProcessor:
             'size': img.size,
             'mode': img.mode,
         }
+
+    def get_image_base64(self, image_path: Path) -> str:
+        """
+        Backward-compatible helper used by existing notebook cells.
+
+        Args:
+            image_path: Path to image file
+
+        Returns:
+            Base64-encoded image bytes
+        """
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
 
     def get_breed_images(self, breed_name: str, max_images: int = 3) -> List[Dict[str, Any]]:
         """

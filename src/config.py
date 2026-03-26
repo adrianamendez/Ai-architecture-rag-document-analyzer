@@ -85,6 +85,9 @@ RETRIEVAL_CONFIG = {
     "similarity_threshold": 0.5,  # Minimum similarity score
     "use_reranking": True,  # Enable cross-encoder reranking
     "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "image_top_k": 12,  # Number of image vectors to retrieve in multimodal mode
+    "text_weight": 0.7,  # Fusion weight for text retrieval scores
+    "image_weight": 0.3,  # Fusion weight for image retrieval scores
 }
 
 # ChromaDB configuration

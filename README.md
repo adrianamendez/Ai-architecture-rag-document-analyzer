@@ -33,6 +33,17 @@ Goals:
 - Validate quality with deterministic retrieval/answer metrics
 - Keep demo flows reproducible with clear side-by-side comparisons
 
+## Multimodal Retrieval Design Note
+
+- **Implemented in the main app (`src/app.py` via `RAGEngine`):**
+  - Text documents are indexed with sentence-transformer embeddings.
+  - Breed images are indexed in a separate Chroma collection using CLIP embeddings.
+  - Query-time retrieval runs in both spaces and fuses text+image scores by breed.
+  - Fused context is then sent to generation (Ollama/LLaVA).
+- **Notebook-aligned demo app (`streamlit_app.py`):**
+  - Uses fixed outputs for reproducibility and presentation.
+- **Tradeoff:** multimodal indexing improves image-driven retrieval quality, but requires more preprocessing time, storage, and runtime complexity than text-only retrieval.
+
 ## Datasets Used
 
 - **Dog Breeds General Dataset (tabular, no images):**  
@@ -95,7 +106,7 @@ ls data/documents   # Should show dog_breeds.csv
 # Option A: Main interactive app
 streamlit run src/app.py
 
-# Option B: Demo app aligned with notebook (includes live 3-way demo buttons)
+# Option B: Demo app aligned with notebook (fixed demo outputs)
 streamlit run streamlit_app.py
 ```
 
@@ -108,9 +119,17 @@ The app will open in your browser at `http://localhost:8501`
 - **Vector Database** (ChromaDB) with efficient retrieval
 - **Cross-Encoder Reranking** for improved ranking quality
 - **Ollama Integration** for local inference (no API key)
-- **Live 3-way comparisons** in the notebook-aligned demo app
+- **Notebook-aligned fixed 3-way comparisons** in `streamlit_app.py`
+- **Full multimodal retrieval** (text + image vector fusion) in `src/app.py`
 
-### Evaluation Metrics (Lightweight)
+### Main App Evaluation (`src/app.py`)
+- **RAGAS evaluation pipeline** with:
+  - Faithfulness
+  - Answer Relevancy
+  - Context Precision
+  - Context Recall
+
+### Demo Metrics (`streamlit_app.py`)
 - **Hit@k**: Expected breed appears in retrieved top-k documents
 - **Precision@k**: Fraction of relevant docs in top-k
 - **Top similarity**: Best retrieval similarity score
@@ -125,7 +144,7 @@ The app will open in your browser at `http://localhost:8501`
 
 ```
 rag-document-analyzer/
-├── streamlit_app.py               # Notebook-aligned demo app (live 3-way comparison)
+├── streamlit_app.py               # Notebook-aligned demo app (fixed 3-way comparison)
 │
 ├── src/
 │   ├── app.py                     # Main Streamlit web application
@@ -201,8 +220,8 @@ In the **Dataset Info** tab:
 Use this app when you want the exact demo flow aligned with `rag_demo_notebook.ipynb`:
 - Demo 1: Family query with **No RAG / limited RAG / expanded RAG**
 - Demo 2: Nami images with **vision-only / limited RAG / expanded RAG**
-- `Run live Demo 1` and `Run live Demo 2` buttons execute real retrieval + reranking + generation
-- Radar tab switches to **live computed metrics** after both demos run
+- Uses fixed/hardcoded notebook outputs for reproducibility
+- Shows baseline deterministic metrics as presented in the notebook demo
 
 ## 🧪 Testing Individual Components
 

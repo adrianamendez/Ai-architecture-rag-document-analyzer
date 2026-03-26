@@ -30,7 +30,7 @@ st.info("""
 - ✅ **EXPANDED RAG**: Retrieval with stronger context coverage
 - 🐶 **Real Example**: Identifying my dog Nami's breed with multimodal RAG
 
-🎥 For full interactive version with Ollama, run locally or see video demo.
+For full live retrieval and generation, run `src/app.py` with local Ollama.
 """)
 st.warning("""
 This Streamlit page is intentionally notebook-aligned and uses **hardcoded outputs** from the notebook.
@@ -62,6 +62,7 @@ with st.sidebar:
     - 📊 Deterministic retrieval metrics
     - 🎨 Streamlit + Plotly
     - 🤖 Sentence Transformers
+    - 🖼️ CLIP image embeddings (implemented in main app pipeline)
     """)
 
 # Load dataset
@@ -232,6 +233,13 @@ with tab2:
     **Personal Demo**: Can the multimodal RAG system correctly identify my dog Nami's breed?
 
     This demonstrates the power of **Multimodal RAG** combining vision (LLaVA) with text retrieval.
+    """)
+    st.info("""
+    **Multimodal design note (important):**
+    - Main app implementation (`src/app.py` + `RAGEngine`) uses **full multimodal retrieval**:
+      text embeddings + image embeddings (CLIP) + score fusion.
+    - This notebook-aligned Streamlit page keeps fixed/hardcoded outputs for reproducibility.
+    - Multimodal indexing improves image-driven retrieval, but it also increases preprocessing time, storage, and query complexity.
     """)
 
     # Display the dog images
@@ -507,7 +515,10 @@ with tab3:
         {"Scenario": "Demo 1 - Family query", "Hit@k": 0.0, "Precision@k": 0.0, "Top similarity": 0.487, "Answer coverage": 1.0},
         {"Scenario": "Demo 2 - Nami query", "Hit@k": 1.0, "Precision@k": 0.2, "Top similarity": 0.720, "Answer coverage": 1.0},
     ])
-    st.info("Notebook baseline values are shown here as fixed demo outputs.")
+    st.info("""
+    Notebook baseline values are shown here as fixed demo outputs.
+    In Demo 1, `Hit@k` and `Precision@k` are 0 because the expected breeds were not found in the top-k retrieved documents for that baseline run.
+    """)
 
     metrics = ["Hit@k", "Precision@k", "Top similarity", "Answer coverage"]
     fig = go.Figure()
@@ -646,12 +657,12 @@ rag-document-analyzer/
 st.divider()
 st.markdown("""
 ---
-**Repository:** [GitLab EPAM](https://git.epam.com/denise_mendez/ai-architecture-rag-document-analyzer)
+**Repository:** [GitHub](https://github.com/adrianamendez/Ai-architecture-rag-document-analyzer/tree/main)
 
 **Technologies:** Ollama • ChromaDB • Streamlit • LLaVA • Sentence Transformers • UMAP
 
 **Demo Features:** Two interactive scenarios • 3-way comparisons • Lightweight quality radar • Real breed identification (Nami 🐺)
 
 ---
-*Interactive Demo - For full RAG functionality with Ollama, run locally*
+*Notebook-aligned demo mode (fixed outputs). For live multimodal retrieval, use `src/app.py`.*
 """)
